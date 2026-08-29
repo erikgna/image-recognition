@@ -165,3 +165,103 @@ live view is a straight sum of their individual costs — see "Limitations".
   the live view feels laggy on other hardware, the straightforward next step
   is throttling object detection to every Nth frame (it's the most expensive
   of the three additions).
+
+# Hand Piano POC — `piano.py`
+
+## What it does
+
+Opens the webcam and turns both hands into a 10-note piano: each of the 5
+fingers on each hand is permanently assigned one musical note (a C4-to-E5
+diatonic run, left hand = lower 5 notes, right hand = upper 5). Curling a
+finger down — like tapping a key while your hand hovers in the air — plays
+that finger's note and lights up its key in an on-screen HUD. No spatial
+key-touching is involved: the "keys" are a fixed heads-up display, not
+something you have to align your hand over.
+
+## How it works
+
+1. MediaPipe Hands (`mp.solutions.hands`, same classic API `recognize.py`
+   uses, pinned to `mediapipe==0.10.21`) gives up to 2 hands' worth of 21
+   normalized landmarks per frame, plus a Left/Right label per hand via
+   `multi_handedness`.
+2. For each finger, a "curl score" is computed from normalized landmark
+   coordinates (resolution-independent): for the 4 non-thumb fingers, it's
+   `tip.y - pip.y` (bigger = tip further below its middle knuckle = more
+   bent). The thumb flexes toward the palm rather than vertically, so it
+   instead uses the aspect-ratio-corrected distance from the thumb tip to the
+   index-finger knuckle, negated so the same "bigger = more curled" sign
+   convention holds for all 5 fingers.
+3. A per-finger hysteresis state machine (`up`/`down`, distinct down/up
+   thresholds) turns that continuous score into a single fire-once-per-tap
+   event: crossing the down-threshold fires the note and flips to `down`;
+   the finger must cross back past a lower up-threshold (fully re-extend)
+   before it can fire again. A held bent finger does not repeat-fire.
+4. Each note is a precomputed sine wave (numpy) with a linear attack/release
+   envelope (avoids an audible click from gating the tone on/off), played
+   non-blocking via `sd.play()` (`sounddevice`).
+5. A fixed 2-row x 5-col HUD (`cv2.rectangle`/`cv2.putText`) shows all 10
+   keys, filled/recolored while a finger is in the `down` state.
+
+## Why this design
+
+- **Curl-based press, not spatial touch**: binding each finger permanently
+  to one note is robust to hand distance/position from the camera and
+  doesn't require the user to precisely align a fingertip over a small
+  on-screen rectangle, at the cost of not being a literally-touchable piano.
+- **Normalized coordinates over pixel coordinates**: the same threshold
+  constants then work regardless of webcam resolution. This does not remove
+  distance-from-camera sensitivity (a hand held very close to the lens
+  produces larger normalized deltas for the same physical motion) — a real
+  limitation, not fully solved here.
+- **`sd.play()` over a persistent output stream**: simplest API that fits
+  directly in the frame loop with no extra threading, at the cost of not
+  being able to mix overlapping notes (see verified limitation below).
+
+## Verified so far
+
+- `sounddevice==0.5.6` (added to `requirements.txt` as a direct, pinned
+  dependency — previously only an undeclared transitive dependency of
+  mediapipe) has a working Core Audio backend on this Mac with no extra
+  `brew install`: `sd.query_devices()` lists "MacBook Pro Speakers" as the
+  default output device.
+- A synthesized 440Hz tone (`make_tone(440.0)`) played via
+  `sd.play(..., blocking=True)` runs to completion with no exceptions; the
+  envelope ramps cleanly from/to exactly 0 at both ends (checked
+  numerically), so it should not click.
+- The curl math and the up/down/re-extend/re-fire state machine were
+  exercised with synthetic landmark data (not a real hand): confirmed a
+  finger fires exactly once per curl, does not repeat-fire while held bent,
+  and requires a full re-extension past the up-threshold before it can fire
+  again, for both a non-thumb finger and the thumb's distance-based scoring.
+- `piano.py` byte-compiles cleanly (`py_compile`).
+
+## Not yet verified — needs a live run with a real webcam and a real hand
+
+These require a human watching the screen and listening, not just code
+execution, so they are explicitly **not** claimed as working yet:
+
+- Whether the tone is actually *audible* at a reasonable volume (only
+  "played with no error" was confirmed above).
+- Whether `multi_handedness` labels Left/Right correctly with
+  `MIRROR_FRAME = True` on this webcam, or needs flipping.
+- Whether `FINGER_CURL_DOWN_MARGIN` / `UP_MARGIN` (0.05 / 0.02) and the
+  thumb's `THUMB_CURL_DOWN_DISTANCE` / `UP_DISTANCE` (0.08 / 0.11) are wide
+  enough to avoid false fires from natural hand tremor on a relaxed,
+  non-rigid hand, or need widening.
+- Whether the thumb heuristic cross-triggers the neighboring index note,
+  given how spatially close their landmarks are.
+- Two-hand simultaneous use: correct HUD mapping and no state
+  cross-contamination between hands.
+- The documented `sd.play()` behavior — "cannot be used for multiple
+  overlapping playbacks," confirmed from its own docstring — means a fast
+  multi-finger press only plays whichever note's `play_note()` call landed
+  last; this needs an actual fist/multi-curl test to confirm what's audibly
+  heard matches that expectation.
+- Sustained responsiveness over a full run, and a clean shutdown with no
+  hung audio when quitting mid-tone.
+
+All of these constants (`FINGER_CURL_DOWN_MARGIN`, `FINGER_CURL_UP_MARGIN`,
+`THUMB_CURL_DOWN_DISTANCE`, `THUMB_CURL_UP_DISTANCE`, `MIRROR_FRAME`) are
+starting values in `piano.py`, the same way `COSINE_MATCH_THRESHOLD` was a
+tunable starting point above — expect to adjust them after running against
+a real hand and updating this section with what was actually observed.

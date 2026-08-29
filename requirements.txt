@@ -3,3 +3,4 @@ numpy
 ultralytics
 git+https://github.com/ultralytics/CLIP.git
 mediapipe==0.10.21
+sounddevice==0.5.6
