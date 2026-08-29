@@ -1,0 +1,5 @@
+opencv-contrib-python>=4.10.0
+numpy
+ultralytics
+git+https://github.com/ultralytics/CLIP.git
+mediapipe==0.10.21
